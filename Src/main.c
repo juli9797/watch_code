@@ -70,7 +70,6 @@ uint8_t brt_values[6] = { 0b00000, 0b00100, 0b01010, 0b10101, 0b11011, 0b11111 }
 uint8_t blink[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 uint8_t blink_stat[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
-
 static uint8_t offsetLED_mapping[4] = { 14, 15, 13, 12 };
 //INPUT
 int button_state = 0; // 0 = none, 1 = short 2 = long
@@ -80,11 +79,10 @@ const uint32_t button_time_thr = 700;
 uint8_t hours = 0;
 uint8_t minutes = 7;
 uint8_t seconds = 0;
-
-
+int en_timekeeping = 1;
 //Timeout
 int timeout_state = 0;
-static uint32_t timeout [3] = { 0, 10000, 30000};
+static uint32_t timeout[3] = { 0, 10000, 30000 };
 int timeout_ref = 0;
 
 //State machine
@@ -108,11 +106,13 @@ static void MX_TIM2_Init(void);
 //LEDs
 static void flip_Framebuffer();
 
-static void set_Time(int h, int min, int sec);
+static void set_Time(uint32_t);
 
 static void animation();
 static void clear_wakeup();
 static void reset_timeout();
+static void second_Expired();
+static void standby();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -151,14 +151,10 @@ void animation() {
 				blink_stat[i] = !blink_stat[i];
 
 			}
-			if (blink_stat[i] != 0 && blink_stat[i] != 1) {
-				int error = 1;
-			}
 
 			ptr_buffer[i] = blink_stat[i] * 5;
 		}
 	}
-
 
 }
 
@@ -171,9 +167,9 @@ void tick() {
 		button_time = 0;
 	}
 
-
 	//Timeout
-	if(timeout[timeout_state]!= 0 && ticks-timeout_ref > timeout[timeout_state]){
+	if (timeout[timeout_state] != 0
+			&& ticks - timeout_ref > timeout[timeout_state]) {
 		standby();
 	}
 }
@@ -186,7 +182,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 
 	} else {
 		//Button released
-		if (HAL_GetTick() - button_time < button_time_thr && button_time != 0 ) {
+		if (HAL_GetTick() - button_time < button_time_thr && button_time != 0) {
 
 			button_state = 1;
 
@@ -287,15 +283,17 @@ static void draw_time(int blink_min, int blink_h, int blink_ofst) {
 
 }
 void second_Expired() {
-	seconds++;
-	if (seconds >= 60) {
-		seconds = 0;
-		minutes++;
-		if (minutes >= 60) {
-			minutes = 0;
-			hours++;
-			if (hours >= 12) {
-				hours = 0;
+	if (en_timekeeping) {
+		seconds++;
+		if (seconds >= 60) {
+			seconds = 0;
+			minutes++;
+			if (minutes >= 60) {
+				minutes = 0;
+				hours++;
+				if (hours >= 12) {
+					hours = 0;
+				}
 			}
 		}
 	}
@@ -310,28 +308,27 @@ void standby() {
 	PWR->CSR |= PWR_CSR_EWUP;
 	//Sleepdeep
 
-
 	HAL_GPIO_WritePin(K0_GPIO_Port, K0_Pin, 0);
 	HAL_GPIO_WritePin(K1_GPIO_Port, K1_Pin, 0);
 	HAL_GPIO_WritePin(EN_A_GPIO_Port, EN_A_Pin, 1);
 
 	__WFI();
 }
-void reset_timeout(){
+void reset_timeout() {
 	timeout_ref = HAL_GetTick();
 }
-void clear_wakeup(){
+void clear_wakeup() {
 	//Clear Standby Flag
 	PWR->CR |= PWR_CR_CSBF;
 	//Clear Wakeup Event Flag
 	PWR->CR |= PWR_CR_CWUF;
 }
-void wait_RTC_write(){
-	while(! (RTC->CRL & RTC_CRL_RTOFF)){
-			asm("NOP");
-		}
+void wait_RTC_write() {
+	while (!(RTC->CRL & RTC_CRL_RTOFF)) {
+		asm("NOP");
+	}
 }
-void RTC_init(){
+void RTC_init() {
 	//Enable RTC & backup domain clocks
 	RCC->APB1ENR |= RCC_APB1ENR_PWREN;
 	RCC->APB1ENR |= RCC_APB1ENR_BKPEN;
@@ -340,10 +337,17 @@ void RTC_init(){
 	//activate LSE clock
 	RCC->BDCR |= RCC_BDCR_LSEON;
 	// check if LSE is running
-	if(RCC->BDCR & RCC_BDCR_LSERDY){
-		//COOL THIS IS UP AND RUNNING!!!!!!
-	} else{
-		//SHIT THE QUARTZ IS NOT FEELING IT TODAY:(
+
+	/*
+	 * SOME LOOPY SHIT NECESSARY
+	 */
+	while (1) {
+		if (RCC->BDCR & RCC_BDCR_LSERDY) {
+			//COOL THIS IS UP AND RUNNING!!!!!!
+			break;
+		} else {
+			//SHIT THE QUARTZ IS NOT FEELING IT TODAY:(
+		}
 	}
 	//select LSE as RTC CLOCK
 	RCC->BDCR |= RCC_BDCR_RTCSEL_LSE;
@@ -351,14 +355,42 @@ void RTC_init(){
 	RCC->BDCR |= RCC_BDCR_RTCEN;
 
 	wait_RTC_write();
-	RTC->PRLL |= 0x7FFFh;
+	//Set the prescaler (VALUE STOLEN FROM DATASHEET)
+	RTC->PRLL |= 0x7FFF;
 
 }
 
-void set_Time(int t){
-	seconds = t%60;
-	minutes = (t/60)%60;
-	hours = (t/60/12)%12;
+void set_Time(uint32_t t) {
+	seconds = t % 60;
+	minutes = (t / 60) % 60;
+	hours = (t / 60 / 12) % 12;
+}
+uint32_t generate_Timestamp() {
+	return hours * 60 * 60 + minutes * 60 + seconds;
+}
+uint32_t read_RTC() {
+	return (8 << (RTC->CNTH)) | RTC->CNTL;
+}
+uint32_t write_RTC(uint32_t t) {
+	//see 18.3.4 in reference manual
+	uint16_t H = 16 >> t;
+	uint16_t L = t & 0xFFFF;
+
+	//enter RTC config mode
+	wait_RTC_write();
+	RTC->CRL |= RTC_CRL_CNF;
+	//Write count bits
+	wait_RTC_write();
+	RTC->CNTH = H;
+	wait_RTC_write();
+	RTC->CNTL = L;
+	//leave RTC config mode
+	wait_RTC_write();
+	RTC->CRL &= ~RTC_CRL_CNF;
+
+	//wait until all write operations finished
+	wait_RTC_write();
+
 }
 
 /* USER CODE END 0 */
@@ -395,6 +427,9 @@ int main(void) {
 	MX_TIM3_Init();
 	MX_TIM2_Init();
 	/* USER CODE BEGIN 2 */
+	//INIT RTC
+	//RTC_init();
+	set_Time(read_RTC());
 	HAL_TIM_Base_Start_IT(&htim2);
 	HAL_TIM_Base_Start_IT(&htim3);
 
@@ -402,18 +437,16 @@ int main(void) {
 
 	/* Infinite loop */
 	/* USER CODE BEGIN WHILE */
-	int cycle = 0;
 	uint32_t starttime = HAL_GetTick();
 	uint32_t now;
 	int programm_nr = 0;
-	//timeset vars
+//timeset vars
 	int timeset_state = 0;
-	int pos = 0;
 	while (1) {
 		switch (state) {
 		case time:
 			//short standby timeout
-			timeout_state = 1;
+			timeout_state = 0;
 			//DRAW
 			draw_time(10, 0, 0);
 			/*for (int i = 0; i<16; i++){
@@ -427,7 +460,6 @@ int main(void) {
 			} else if (button_state == 2) {
 				button_state = 0;
 				clear_blink();
-				standby();
 				state = timeset;
 				programm_nr = 0;
 			}
@@ -463,6 +495,8 @@ int main(void) {
 		case timeset:
 			//long standby timeout
 			timeout_state = 2;
+			//disable timekeeping
+			en_timekeeping = 0;
 			if (button_state == 1) {
 
 				button_state = 0;
@@ -478,6 +512,7 @@ int main(void) {
 				case 1:
 					//MIN
 					minutes += 5;
+					minutes = minutes - minutes % 5;
 					if (minutes > 60) {
 						minutes -= 60;
 					}
@@ -514,6 +549,12 @@ int main(void) {
 				button_state = 0;
 				timeset_state++;
 				if (timeset_state == 3) {
+					//save everything first
+					//write_RTC(generate_Timestamp());
+
+					//enable timekeeping again
+					en_timekeeping = 1;
+
 					state = time;
 					timeset_state = 0;
 					seconds = 0;
@@ -536,105 +577,7 @@ int main(void) {
 		}
 		starttime = now;
 		flip_Framebuffer();
-		//We need states: setTime and normal
-		/*if (button_state == 2) {
-		 button_state = 0;
 
-		 int pos = 0;
-		 while (1) {
-		 //hours
-		 if (button_state == 1) {
-		 button_state = 0;
-		 pos++;
-		 if (pos > 11) {
-		 pos = 0;
-		 }
-		 //DRAW
-		 for (int i = 0; i < 16; i++) {
-		 ptr_buffer[i] = (pos == i) ? 5 : 0;
-		 }
-		 //FLIP BUFFERS
-		 flip_Framebuffer();
-		 }
-		 if (button_state == 2) {
-		 button_state = 0;
-		 hours = pos;
-		 pos = 0;
-		 break;
-		 }
-		 }
-		 while (1) {
-		 //5 minutes
-		 if (button_state == 1) {
-		 button_state = 0;
-		 pos++;
-		 if (pos > 11) {
-		 pos = 0;
-		 }
-		 //DRAW
-		 for (int i = 0; i < 16; i++) {
-		 ptr_buffer[i] = ( pos == i) ? 5 : 0;
-		 }
-		 //FLIP BUFFERS
-		 flip_Framebuffer();
-		 }
-		 if (button_state == 2) {
-		 button_state = 0;
-		 minutes = pos * 5;
-		 pos = 0;
-		 break;
-		 }
-		 }
-		 while (1) {
-		 //minute-offset
-		 if (button_state == 1) {
-		 button_state = 0;
-		 pos++;
-		 if (pos > 3) {
-		 pos = 0;
-		 }
-		 //DRAW
-		 for (int i = 0; i < 16; i++) {
-		 ptr_buffer[i] = (offsetLED_mapping[pos] == i) ? 5 : 0;
-		 }
-		 //FLIP BUFFERS
-		 flip_Framebuffer();
-		 }
-
-		 if (button_state == 2) {
-		 button_state = 0;
-		 minutes += pos;
-		 pos = 0;
-		 break;
-		 }
-		 }
-
-		 }*/
-		/*if (button_state >= 1) {
-		 int state = button_state;
-		 button_state = 0;
-		 cycle += (state == 1) ? 1 : 6;
-		 if (cycle > 15) {
-		 cycle = 0;
-		 }
-		 //DRAW
-		 for (int i = 0; i < 16; i++) {
-		 ptr_buffer[i] = (cycle == i) ? 5 : 0;
-		 }
-		 //FLIP BUFFERS
-		 flip_Framebuffer();
-		 for (int i = 0; i < 100000; i++) {
-		 asm("NOP");
-
-		 }
-
-		 }*/
-
-		/*brt+=up;
-		 if(brt == 5|| brt == 0){
-		 up*=-1;
-		 }*/
-		//HAL_GPIO_TogglePin(EN_A_GPIO_Port, EN_A_Pin);
 		/* USER CODE END WHILE */
 
 		/* USER CODE BEGIN 3 */
@@ -757,8 +700,8 @@ static void MX_TIM2_Init(void) {
 static void MX_TIM3_Init(void) {
 
 	/* USER CODE BEGIN TIM3_Init 0 */
-	//100-1
-	//10-1
+//100-1
+//10-1
 	/* USER CODE END TIM3_Init 0 */
 
 	TIM_ClockConfigTypeDef sClockSourceConfig = { 0 };
