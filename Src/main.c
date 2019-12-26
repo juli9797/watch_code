@@ -58,7 +58,7 @@ struct LED_CONFIG {
 
 int counter = 0;
 
-//brightness Array and Buffer
+//LEDs and shit
 uint8_t brightness[LED_COUNT];
 uint8_t brightnessB[LED_COUNT];
 
@@ -69,16 +69,23 @@ uint8_t brt_values[6] = { 0b00000, 0b00100, 0b01010, 0b10101, 0b11011, 0b11111 }
 
 uint8_t blink[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 uint8_t blink_stat[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+
+static uint8_t offsetLED_mapping[4] = { 14, 15, 13, 12 };
 //INPUT
 int button_state = 0; // 0 = none, 1 = short 2 = long
 uint32_t button_time = 0;
 const uint32_t button_time_thr = 700;
-//Time
+//Timekeeping
 uint8_t hours = 0;
 uint8_t minutes = 7;
 uint8_t seconds = 0;
 
-uint8_t offsetLED_mapping[4] = { 14, 15, 13, 12 };
+
+//Timeout
+int timeout_state = 0;
+static uint32_t timeout [3] = { 0, 10000, 30000};
+int timeout_ref = 0;
 
 //State machine
 enum {
@@ -104,10 +111,8 @@ static void flip_Framebuffer();
 static void set_Time(int h, int min, int sec);
 
 static void animation();
-
-static uint8_t get_Minute_led();
-static uint8_t get_Hour_led();
-
+static void clear_wakeup();
+static void reset_timeout();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -117,7 +122,7 @@ uint8_t get_Minute_led() {
 }
 uint8_t get_Minute_Offset_led() {
 	int val = minutes % 5;
-	if(val == 0){
+	if (val == 0) {
 		return 17;
 	}
 	return offsetLED_mapping[val - 1];
@@ -146,13 +151,14 @@ void animation() {
 				blink_stat[i] = !blink_stat[i];
 
 			}
-			if(blink_stat[i]!=0 && blink_stat[i] != 1){
-				int error  = 1;
+			if (blink_stat[i] != 0 && blink_stat[i] != 1) {
+				int error = 1;
 			}
 
 			ptr_buffer[i] = blink_stat[i] * 5;
 		}
 	}
+
 
 }
 
@@ -165,8 +171,14 @@ void tick() {
 		button_time = 0;
 	}
 
+
+	//Timeout
+	if(timeout[timeout_state]!= 0 && ticks-timeout_ref > timeout[timeout_state]){
+		standby();
+	}
 }
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	reset_timeout();
 	if (HAL_GPIO_ReadPin(SWITCH_GPIO_Port, SWITCH_Pin)) {
 		//Button pressed
 		button_state = 0;
@@ -174,7 +186,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 
 	} else {
 		//Button released
-		if (HAL_GetTick() - button_time < button_time_thr) {
+		if (HAL_GetTick() - button_time < button_time_thr && button_time != 0 ) {
+
 			button_state = 1;
 
 		}
@@ -227,6 +240,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
 	} else if (htim->Instance == TIM2) {
 		//animation();
+		second_Expired();
 	}
 }
 static void flip_Framebuffer() {
@@ -235,10 +249,10 @@ static void flip_Framebuffer() {
 	ptr_buffer = ptr_draw;
 	ptr_draw = ptr_temp;
 	/*
-	ptr_draw = (void*) ((uintptr_t) ptr_draw ^ (uintptr_t) ptr_buffer);
-	ptr_buffer = (void*) ((uintptr_t) ptr_draw ^ (uintptr_t) ptr_buffer);
-	ptr_draw = (void*) ((uintptr_t) ptr_draw ^ (uintptr_t) ptr_buffer);
-	*/
+	 ptr_draw = (void*) ((uintptr_t) ptr_draw ^ (uintptr_t) ptr_buffer);
+	 ptr_buffer = (void*) ((uintptr_t) ptr_draw ^ (uintptr_t) ptr_buffer);
+	 ptr_draw = (void*) ((uintptr_t) ptr_draw ^ (uintptr_t) ptr_buffer);
+	 */
 
 }
 static void draw_time(int blink_min, int blink_h, int blink_ofst) {
@@ -272,6 +286,81 @@ static void draw_time(int blink_min, int blink_h, int blink_ofst) {
 	}
 
 }
+void second_Expired() {
+	seconds++;
+	if (seconds >= 60) {
+		seconds = 0;
+		minutes++;
+		if (minutes >= 60) {
+			minutes = 0;
+			hours++;
+			if (hours >= 12) {
+				hours = 0;
+			}
+		}
+	}
+}
+void standby() {
+	SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+	//PWR->CR->PDDS 1
+	PWR->CR |= PWR_CR_PDDS;
+
+	clear_wakeup();
+	//WKP PIN
+	PWR->CSR |= PWR_CSR_EWUP;
+	//Sleepdeep
+
+
+	HAL_GPIO_WritePin(K0_GPIO_Port, K0_Pin, 0);
+	HAL_GPIO_WritePin(K1_GPIO_Port, K1_Pin, 0);
+	HAL_GPIO_WritePin(EN_A_GPIO_Port, EN_A_Pin, 1);
+
+	__WFI();
+}
+void reset_timeout(){
+	timeout_ref = HAL_GetTick();
+}
+void clear_wakeup(){
+	//Clear Standby Flag
+	PWR->CR |= PWR_CR_CSBF;
+	//Clear Wakeup Event Flag
+	PWR->CR |= PWR_CR_CWUF;
+}
+void wait_RTC_write(){
+	while(! (RTC->CRL & RTC_CRL_RTOFF)){
+			asm("NOP");
+		}
+}
+void RTC_init(){
+	//Enable RTC & backup domain clocks
+	RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+	RCC->APB1ENR |= RCC_APB1ENR_BKPEN;
+	//unlock backup domain registers
+	PWR->CR |= PWR_CR_DBP;
+	//activate LSE clock
+	RCC->BDCR |= RCC_BDCR_LSEON;
+	// check if LSE is running
+	if(RCC->BDCR & RCC_BDCR_LSERDY){
+		//COOL THIS IS UP AND RUNNING!!!!!!
+	} else{
+		//SHIT THE QUARTZ IS NOT FEELING IT TODAY:(
+	}
+	//select LSE as RTC CLOCK
+	RCC->BDCR |= RCC_BDCR_RTCSEL_LSE;
+	//enable RTC
+	RCC->BDCR |= RCC_BDCR_RTCEN;
+
+	wait_RTC_write();
+	RTC->PRLL |= 0x7FFFh;
+
+}
+
+void set_Time(int t){
+	seconds = t%60;
+	minutes = (t/60)%60;
+	hours = (t/60/12)%12;
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -306,7 +395,7 @@ int main(void) {
 	MX_TIM3_Init();
 	MX_TIM2_Init();
 	/* USER CODE BEGIN 2 */
-	//HAL_TIM_Base_Start_IT(&htim3);
+	HAL_TIM_Base_Start_IT(&htim2);
 	HAL_TIM_Base_Start_IT(&htim3);
 
 	/* USER CODE END 2 */
@@ -323,28 +412,30 @@ int main(void) {
 	while (1) {
 		switch (state) {
 		case time:
-			;
+			//short standby timeout
+			timeout_state = 1;
 			//DRAW
 			draw_time(10, 0, 0);
 			/*for (int i = 0; i<16; i++){
-				ptr_buffer[i] = (5>i) ? 5 : 0;
-			}*/
+			 ptr_buffer[i] = (5>i) ? 5 : 0;
+			 }*/
 			if (button_state == 1) {
-
 				button_state = 0;
 				clear_blink();
 				state = menue;
 				programm_nr = 0;
 			} else if (button_state == 2) {
-
 				button_state = 0;
 				clear_blink();
+				standby();
 				state = timeset;
 				programm_nr = 0;
 			}
 
 			break;
 		case menue:
+			//long standby timeout
+			timeout_state = 2;
 			for (int i = 0; i < 16; i++) {
 				ptr_buffer[i] = (offsetLED_mapping[programm_nr] == i) ? 5 : 0;
 
@@ -365,10 +456,13 @@ int main(void) {
 			}
 			break;
 		case program:
+			//long standby timeout
+			timeout_state = 2;
 			state = time;
 			break;
 		case timeset:
-
+			//long standby timeout
+			timeout_state = 2;
 			if (button_state == 1) {
 
 				button_state = 0;
@@ -422,7 +516,7 @@ int main(void) {
 				if (timeset_state == 3) {
 					state = time;
 					timeset_state = 0;
-					counter == 0;
+					seconds = 0;
 				}
 
 				clear_blink();
@@ -436,7 +530,7 @@ int main(void) {
 
 		//Gameloop moves
 		now = HAL_GetTick();
-		int period = 100;
+		int period = 50;
 		if (now - starttime < period) {
 			HAL_Delay(period - (now - starttime));
 		}
@@ -631,10 +725,10 @@ static void MX_TIM2_Init(void) {
 
 	/* USER CODE END TIM2_Init 1 */
 	htim2.Instance = TIM2;
-	htim2.Init.Prescaler = 150;
+	htim2.Init.Prescaler = 7999;
 	htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-	htim2.Init.Period = 9;
-	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	htim2.Init.Period = 999;
+	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
 	htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
 	if (HAL_TIM_Base_Init(&htim2) != HAL_OK) {
 		Error_Handler();
@@ -674,7 +768,7 @@ static void MX_TIM3_Init(void) {
 
 	/* USER CODE END TIM3_Init 1 */
 	htim3.Instance = TIM3;
-	htim3.Init.Prescaler = 150;
+	htim3.Init.Prescaler = 99;
 	htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
 	htim3.Init.Period = 9;
 	htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
