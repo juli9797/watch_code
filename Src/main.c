@@ -363,7 +363,7 @@ void RTC_init() {
 void set_Time(uint32_t t) {
 	seconds = t % 60;
 	minutes = (t / 60) % 60;
-	hours = (t / 60 / 12) % 12;
+	hours = (t / 60 / 60) % 12;
 }
 uint32_t generate_Timestamp() {
 	return hours * 60 * 60 + minutes * 60 + seconds;
@@ -428,10 +428,12 @@ int main(void) {
 	MX_TIM2_Init();
 	/* USER CODE BEGIN 2 */
 	//INIT RTC
-	//RTC_init();
+	RTC_init();
 	set_Time(read_RTC());
 	HAL_TIM_Base_Start_IT(&htim2);
 	HAL_TIM_Base_Start_IT(&htim3);
+
+
 
 	/* USER CODE END 2 */
 
@@ -446,7 +448,7 @@ int main(void) {
 		switch (state) {
 		case time:
 			//short standby timeout
-			timeout_state = 0;
+			timeout_state = 1;
 			//DRAW
 			draw_time(10, 0, 0);
 			/*for (int i = 0; i<16; i++){
@@ -550,14 +552,16 @@ int main(void) {
 				timeset_state++;
 				if (timeset_state == 3) {
 					//save everything first
-					//write_RTC(generate_Timestamp());
+
+					seconds = 0;
+					write_RTC(generate_Timestamp());
 
 					//enable timekeeping again
 					en_timekeeping = 1;
 
 					state = time;
 					timeset_state = 0;
-					seconds = 0;
+
 				}
 
 				clear_blink();
