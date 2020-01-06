@@ -79,6 +79,8 @@ const uint32_t button_time_thr = 700;
 uint8_t hours = 0;
 uint8_t minutes = 7;
 uint8_t seconds = 0;
+uint32_t timestamp = 0;
+uint16_t cnth = 0;
 int en_timekeeping = 1;
 //Timeout
 int timeout_state = 0;
@@ -106,13 +108,15 @@ static void MX_TIM2_Init(void);
 //LEDs
 static void flip_Framebuffer();
 
-static void set_Time(uint32_t);
+void set_Time(uint32_t);
 
 static void animation();
 static void clear_wakeup();
 static void reset_timeout();
 static void second_Expired();
 static void standby();
+uint32_t read_RTC();
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -283,20 +287,25 @@ static void draw_time(int blink_min, int blink_h, int blink_ofst) {
 
 }
 void second_Expired() {
+
 	if (en_timekeeping) {
-		seconds++;
-		if (seconds >= 60) {
-			seconds = 0;
-			minutes++;
-			if (minutes >= 60) {
-				minutes = 0;
-				hours++;
-				if (hours >= 12) {
-					hours = 0;
-				}
-			}
-		}
+		set_Time(read_RTC());
 	}
+	/*
+	 if (en_timekeeping) {
+	 seconds++;
+	 if (seconds >= 60) {
+	 seconds = 0;
+	 minutes++;
+	 if (minutes >= 60) {
+	 minutes = 0;
+	 hours++;
+	 if (hours >= 12) {
+	 hours = 0;
+	 }
+	 }
+	 }
+	 }*/
 }
 void standby() {
 	SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
@@ -329,6 +338,7 @@ void wait_RTC_write() {
 	}
 }
 void RTC_init() {
+
 	//Enable RTC & backup domain clocks
 	RCC->APB1ENR |= RCC_APB1ENR_PWREN;
 	RCC->APB1ENR |= RCC_APB1ENR_BKPEN;
@@ -369,11 +379,12 @@ uint32_t generate_Timestamp() {
 	return hours * 60 * 60 + minutes * 60 + seconds;
 }
 uint32_t read_RTC() {
-	return (8 << (RTC->CNTH)) | RTC->CNTL;
+	timestamp  = (RTC->CNTH << 16) |  RTC->CNTL;
+	return timestamp;
 }
 uint32_t write_RTC(uint32_t t) {
 	//see 18.3.4 in reference manual
-	uint16_t H = 16 >> t;
+	uint16_t H = t >> 16;
 	uint16_t L = t & 0xFFFF;
 
 	//enter RTC config mode
@@ -391,6 +402,21 @@ uint32_t write_RTC(uint32_t t) {
 	//wait until all write operations finished
 	wait_RTC_write();
 
+}
+
+void program_second() {
+	uint8_t sec_offset = (seconds%60)%5;
+	uint8_t offst_led = 17;
+	if(sec_offset != 0){
+		offst_led = offsetLED_mapping[sec_offset-1];
+	}
+	for (int i = 0; i < 16; i++) {
+		ptr_buffer[i] = (i == offst_led) | (i==(seconds%60)/5) ? 5:0;
+	}
+	if (button_state == 1) {
+		button_state = 0;
+		state = time;
+	}
 }
 
 /* USER CODE END 0 */
@@ -433,8 +459,6 @@ int main(void) {
 	HAL_TIM_Base_Start_IT(&htim2);
 	HAL_TIM_Base_Start_IT(&htim3);
 
-
-
 	/* USER CODE END 2 */
 
 	/* Infinite loop */
@@ -448,7 +472,7 @@ int main(void) {
 		switch (state) {
 		case time:
 			//short standby timeout
-			timeout_state = 1;
+			timeout_state = 0;
 			//DRAW
 			draw_time(10, 0, 0);
 			/*for (int i = 0; i<16; i++){
@@ -469,7 +493,7 @@ int main(void) {
 			break;
 		case menue:
 			//long standby timeout
-			timeout_state = 2;
+			timeout_state = 0;
 			for (int i = 0; i < 16; i++) {
 				ptr_buffer[i] = (offsetLED_mapping[programm_nr] == i) ? 5 : 0;
 
@@ -491,8 +515,12 @@ int main(void) {
 			break;
 		case program:
 			//long standby timeout
-			timeout_state = 2;
-			state = time;
+			if (programm_nr == 0) {
+				program_second();
+			} else {
+				timeout_state = 0;
+				state = time;
+			}
 			break;
 		case timeset:
 			//long standby timeout
@@ -515,14 +543,14 @@ int main(void) {
 					//MIN
 					minutes += 5;
 					minutes = minutes - minutes % 5;
-					if (minutes > 60) {
+					if (minutes >= 60) {
 						minutes -= 60;
 					}
 					break;
 				case 2:
 					//MIN OFFSET
 					minutes += 1;
-					if (minutes > 59) {
+					if (minutes >= 60) {
 						minutes = 0;
 					}
 					break;
@@ -674,7 +702,7 @@ static void MX_TIM2_Init(void) {
 	htim2.Instance = TIM2;
 	htim2.Init.Prescaler = 7999;
 	htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-	htim2.Init.Period = 999;
+	htim2.Init.Period = 99;
 	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
 	htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
 	if (HAL_TIM_Base_Init(&htim2) != HAL_OK) {
